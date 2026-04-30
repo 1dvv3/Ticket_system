@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APHS Graduation Ticket System</title>
+    <style>
+        :root {
+            --primary: #003366;
+            --accent: #0055a5;
+            --bg: #ffffff;
+            --text: #333;
+            --border: #ddd;
+        }
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f6f8; color: var(--text); margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; background: var(--bg); padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+        header { text-align: center; border-bottom: 2px solid var(--primary); padding-bottom: 10px; margin-bottom: 20px; }
+        header h1 { color: var(--primary); margin: 0; }
+
+        .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+        .tab-btn { padding: 12px 24px; cursor: pointer; border: none; background: none; font-size: 16px; color: #666; border-bottom: 3px solid transparent; transition: 0.2s; }
+        .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: bold; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        button.action-btn { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 14px; margin: 5px; }
+        button.action-btn:hover { background: var(--accent); }
+        input, select { padding: 8px; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+
+        #scan-result { margin-top: 15px; padding: 15px; border-radius: 5px; font-weight: bold; text-align: center; font-size: 18px; }
+        .valid { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .invalid { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+        table { width:100%; border-collapse: collapse; margin-top:10px; }
+        th { background: var(--primary); color: white; padding:10px; border:1px solid #ddd; text-align:left; }
+        td { padding:10px; border:1px solid #ddd; }
+
+        @media print {
+            @page { size: A4 landscape; margin: 10mm; }
+            body { background: white; padding: 0; }
+            .container { box-shadow: none; padding: 0; }
+            header, .tabs, .no-print, button, input, select { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>Arthur Phillip High School</h1>
+        <p>Year 12 Graduation 2026 - Ticket System</p>
+    </header>
+
+    <div class="tabs no-print">
+        <button class="tab-btn active" onclick="switchTab('generate')">Generate Tickets</button>
+        <button class="tab-btn" onclick="switchTab('assign')">Assign Barcodes</button>
+        <button class="tab-btn" onclick="switchTab('scan')">Scan Entry</button>
+    </div>
+
+    <!-- GENERATE TAB -->
+    <div id="generate" class="tab-content active">
+        <h2 class="no-print">Generate Tickets</h2>
+        <div class="no-print" style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+            <input type="file" id="csvInput" accept=".csv">
+            <button class="action-btn" onclick="uploadCSV()">Upload CSV</button>
+            <button class="action-btn" style="background:#28a745;" onclick="loadMockData()">Load Mock Data (Demo)</button>
+        </div>
+        <button class="action-btn no-print" onclick="generatePDF()">Generate & Download PDF</button>
+        
+        <div class="no-print" style="margin-top: 30px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="margin: 0;">Student Tickets Status</h3>
+                <button class="action-btn" onclick="bulkAssign()">Bulk Assign All Barcodes</button>
+            </div>
+            <table id="studentTable">
+                <thead>
+                    <tr>
+                        <th>Student Name</th>
+                        <th>Student ID</th>
+                        <th>Barcode 1</th>
+                        <th>Barcode 2</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="studentTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ASSIGN TAB -->
+    <div id="assign" class="tab-content">
+        <h2 class="no-print">Barcode Lookup</h2>
+        <div class="no-print" style="max-width: 400px; margin: 0 auto;">
+            <input type="text" id="lookupInput1" placeholder="Scan Ticket 1...">
+            <input type="text" id="lookupInput2" placeholder="Scan Ticket 2..." style="margin-top: 10px;">
+            <button class="action-btn" style="width: 100%;" onclick="lookupBarcodes()">Lookup Barcodes</button>
+        </div>
+        <div id="lookup-result" style="margin-top: 20px;"></div>
+    </div>
+
+    <!-- SCAN TAB -->
+    <div id="scan" class="tab-content">
+        <h2 class="no-print">Entry Scan</h2>
+        <div class="no-print" style="max-width: 400px; margin: 0 auto;">
+            <input type="text" id="scanInput" placeholder="Scan Ticket..." autofocus>
+            <button class="action-btn" style="width: 100%; margin-top: 10px;" onclick="validateBarcode()">Validate Entry</button>
+        </div>
+        <div id="scan-result"></div>
+    </div>
+</div>
+
+<script>
+    function switchTab(tabId) {
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById(tabId).classList.add('active');
+        document.querySelectorAll('.tab-btn')[['generate','assign','scan'].indexOf(tabId)].classList.add('active');
+    }
+
+    function renderStudentTable() {
+        fetch('/api/students').then(res => res.json()).then(data => {
+            const tbody = document.getElementById('studentTableBody');
+            tbody.innerHTML = '';
+            if (data.students.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">No students loaded</td></tr>';
+                return;
+            }
+            data.students.forEach(s => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${s.name}</td>
+                    <td>${s.id}</td>
+                    <td>${s.barcode1 || '<span style="color:#999;">Not Assigned</span>'}</td>
+                    <td>${s.barcode2 || '<span style="color:#999;">Not Assigned</span>'}</td>
+                    <td style="color:${s.assigned ? '#28a745' : '#dc3545'}; font-weight:bold;">
+                        ${s.assigned ? 'Assigned' : 'Unassigned'}
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }).catch(err => alert('Error loading students: ' + err));
+    }
+
+    function bulkAssign() {
+        if (!confirm('Assign barcodes to all unassigned students?')) return;
+        fetch('/api/bulk_assign', {method: 'POST'}).then(res => res.json()).then(data => {
+            alert(`Assigned ${data.assigned} students`);
+            renderStudentTable();
+        }).catch(err => alert('Error: ' + err));
+    }
+
+    function loadMockData() {
+        const mockCSV = "Surname,Given Names,Student ID\nValiya,Daksh,456953760\nSmith,Jane,456953761\nDoe,John,456953762\nBrown,Alice,456953763";
+        const formData = new FormData();
+        formData.append('file', new File([mockCSV], "mock.csv"));
+        fetch('/api/load_csv', {method: 'POST', body: formData}).then(res => res.json()).then(data => {
+            alert(data.message || data.error);
+            renderStudentTable();
+            populateDropdown();
+        }).catch(err => alert('Error: ' + err));
+    }
+
+    function uploadCSV() {
+        const file = document.getElementById('csvInput').files[0];
+        if (!file) return alert('Select a CSV file');
+        const formData = new FormData();
+        formData.append('file', file);
+        fetch('/api/load_csv', {method: 'POST', body: formData}).then(res => res.json()).then(data => {
+            alert(data.message || data.error);
+            renderStudentTable();
+            populateDropdown();
+        }).catch(err => alert('Error: ' + err));
+    }
+
+    function generatePDF() {
+        fetch('/api/generate_tickets', {method: 'POST'}).then(res => {
+            if (!res.ok) return res.json().then(e => {throw new Error(e.error)});
+            return res.blob();
+        }).then(blob => {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'Graduation_Tickets_2026.pdf';
+            a.click();
+            URL.revokeObjectURL(url);
+        }).catch(err => alert('PDF Error: ' + err.message));
+    }
+
+    function lookupBarcodes() {
+        const code1 = document.getElementById('lookupInput1').value.trim();
+        const code2 = document.getElementById('lookupInput2').value.trim();
+        if (!code1 || !code2) return alert('Please scan both tickets');
+        fetch('/api/lookup_barcodes', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({barcode1: code1, barcode2: code2})
+        }).then(res => res.json()).then(data => {
+            const div = document.getElementById('lookup-result');
+
+            let html = '';
+
+            // Show error if barcodes don't match
+            if (data.error) {
+                html += `<div style="background:#f8d7da;color:#721c24;border:1px solid #f5c6cb;padding:15px;border-radius:5px;margin-bottom:15px;font-weight:bold;text-align:center;font-size:18px;">
+                    ⚠️ ${data.error}
+                </div>`;
+            }
+
+            html += '<table style="width:100%; border-collapse: collapse;">';
+            html += '<tr><th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Ticket</th>';
+            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Student Name</th>';
+            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Student ID</th>';
+            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Barcode</th>';
+            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Ticket #</th></tr>';
+
+            ['barcode1', 'barcode2'].forEach((key, idx) => {
+                const info = data[key];
+                if (info) {
+                    const rowStyle = data.error ? 'padding:10px;border:1px solid #ddd;background:#fff3cd;' : 'padding:10px;border:1px solid #ddd;';
+                    html += `<tr>
+                        <td style="${rowStyle}">Ticket ${idx+1}</td>
+                        <td style="${rowStyle}">${info.name}</td>
+                        <td style="${rowStyle}">${info.student_id}</td>
+                        <td style="${rowStyle}">${info.barcode}</td>
+                        <td style="${rowStyle}">${info.ticket_num}</td>
+                    </tr>`;
+                } else {
+                    const scanned = idx === 0 ? code1 : code2;
+                    html += `<tr>
+                        <td style="padding:10px;border:1px solid #ddd;">Ticket ${idx+1}</td>
+                        <td colspan="4" style="padding:10px;border:1px solid #ddd;color:#dc3545;font-weight:bold;">No match found for: ${scanned}</td>
+                    </tr>`;
+                }
+            });
+            html += '</table>';
+            div.innerHTML = html;
+
+            // Clear fields and refocus for fast scanning
+            document.getElementById('lookupInput1').value = '';
+            document.getElementById('lookupInput2').value = '';
+            document.getElementById('lookupInput1').focus();
+        }).catch(err => alert('Error: ' + err));
+    }
+
+    function validateBarcode() {
+        const code = document.getElementById('scanInput').value.trim();
+        if (!code) return alert('Please scan a ticket');
+        fetch('/api/scan', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({barcode: code})
+        }).then(res => res.json()).then(data => {
+            const div = document.getElementById('scan-result');
+            div.className = data.valid ? 'valid' : 'invalid';
+            div.innerHTML = `${data.message}<br>${data.name ? 'Student: ' + data.name : ''}`;
+            document.getElementById('scanInput').value = '';
+            document.getElementById('scanInput').focus();
+        }).catch(err => alert('Error: ' + err));
+    }
+
+    window.onload = function() {
+        renderStudentTable();
+    };
+
+    document.getElementById('scanInput').addEventListener('keypress', e => {
+        if (e.key === 'Enter') { e.preventDefault(); validateBarcode(); }
+    });
+</script>
+</body>
+</html>
