@@ -62,14 +62,12 @@
         <div class="no-print" style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
             <input type="file" id="csvInput" accept=".csv">
             <button class="action-btn" onclick="uploadCSV()">Upload CSV</button>
-            <button class="action-btn" style="background:#28a745;" onclick="loadMockData()">Load Mock Data (Demo)</button>
         </div>
         <button class="action-btn no-print" onclick="generatePDF()">Generate & Download PDF</button>
         
         <div class="no-print" style="margin-top: 30px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <h3 style="margin: 0;">Student Tickets Status</h3>
-                <button class="action-btn" onclick="bulkAssign()">Bulk Assign All Barcodes</button>
             </div>
             <table id="studentTable">
                 <thead>
@@ -140,25 +138,6 @@
         }).catch(err => alert('Error loading students: ' + err));
     }
 
-    function bulkAssign() {
-        if (!confirm('Assign barcodes to all unassigned students?')) return;
-        fetch('/api/bulk_assign', {method: 'POST'}).then(res => res.json()).then(data => {
-            alert(`Assigned ${data.assigned} students`);
-            renderStudentTable();
-        }).catch(err => alert('Error: ' + err));
-    }
-
-    function loadMockData() {
-        const mockCSV = "Surname,Given Names,Student ID\nValiya,Daksh,456953760\nSmith,Jane,456953761\nDoe,John,456953762\nBrown,Alice,456953763";
-        const formData = new FormData();
-        formData.append('file', new File([mockCSV], "mock.csv"));
-        fetch('/api/load_csv', {method: 'POST', body: formData}).then(res => res.json()).then(data => {
-            alert(data.message || data.error);
-            renderStudentTable();
-            populateDropdown();
-        }).catch(err => alert('Error: ' + err));
-    }
-
     function uploadCSV() {
         const file = document.getElementById('csvInput').files[0];
         if (!file) return alert('Select a CSV file');
@@ -183,6 +162,19 @@
             a.click();
             URL.revokeObjectURL(url);
         }).catch(err => alert('PDF Error: ' + err.message));
+    }
+
+    function handleLookupScan(e, nextInputId) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (!e.target.value.trim()) return;
+
+        if (nextInputId) {
+            document.getElementById(nextInputId).focus();
+            return;
+        }
+
+        lookupBarcodes();
     }
 
     function lookupBarcodes() {
@@ -263,6 +255,14 @@
 
     document.getElementById('scanInput').addEventListener('keypress', e => {
         if (e.key === 'Enter') { e.preventDefault(); validateBarcode(); }
+    });
+
+    document.getElementById('lookupInput1').addEventListener('keypress', e => {
+        handleLookupScan(e, 'lookupInput2');
+    });
+
+    document.getElementById('lookupInput2').addEventListener('keypress', e => {
+        handleLookupScan(e);
     });
 </script>
 </body>
