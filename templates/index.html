@@ -60,6 +60,9 @@
     <div id="generate" class="tab-content active">
         <h2 class="no-print">Generate Tickets</h2>
         <div class="no-print" style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+            <p style="margin:0 0 10px 0; font-size:14px;">
+                CSV columns: Surname, Given Names, Student ID and optionally <strong>Ticket Count</strong> (0-2, defaults to 2).
+            </p>
             <input type="file" id="csvInput" accept=".csv">
             <button class="action-btn" onclick="uploadCSV()">Upload CSV</button>
         </div>
@@ -74,6 +77,7 @@
                     <tr>
                         <th>Student Name</th>
                         <th>Student ID</th>
+                        <th>Tickets</th>
                         <th>Barcode 1</th>
                         <th>Barcode 2</th>
                         <th>Status</th>
@@ -119,14 +123,20 @@
             const tbody = document.getElementById('studentTableBody');
             tbody.innerHTML = '';
             if (data.students.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">No students loaded</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">No students loaded</td></tr>';
                 return;
             }
             data.students.forEach(s => {
                 const tr = document.createElement('tr');
+                const count = s.ticket_count === undefined ? 2 : s.ticket_count;
                 tr.innerHTML = `
                     <td>${s.name}</td>
                     <td>${s.id}</td>
+                    <td>
+                        <select onchange="updateTicketCount('${s.id.replace(/'/g, "\\'")}', this.value)" title="Number of tickets">
+                            ${[0, 1, 2].map(n => `<option value="${n}" ${n === count ? 'selected' : ''}>${n}</option>`).join('')}
+                        </select>
+                    </td>
                     <td>${s.barcode1 || '<span style="color:#999;">Not Assigned</span>'}</td>
                     <td>${s.barcode2 || '<span style="color:#999;">Not Assigned</span>'}</td>
                     <td style="color:${s.assigned ? '#28a745' : '#dc3545'}; font-weight:bold;">
@@ -136,6 +146,17 @@
                 tbody.appendChild(tr);
             });
         }).catch(err => alert('Error loading students: ' + err));
+    }
+
+    function updateTicketCount(studentId, value) {
+        fetch('/api/ticket_count', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({student_id: studentId, ticket_count: Number(value)})
+        }).then(res => res.json()).then(data => {
+            if (data.error) alert(data.error);
+            renderStudentTable();
+        }).catch(err => alert('Error: ' + err));
     }
 
     function uploadCSV() {
