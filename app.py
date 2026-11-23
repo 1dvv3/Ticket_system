@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import threading
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, send_file
@@ -42,6 +43,7 @@ def draw_stroked_string(pdf_canvas, x, y, text, stroke_width=0.42, char_space=0.
 
 MAX_TICKETS = 2
 DEFAULT_TICKET_COUNT = 2
+_signout_lock = threading.Lock()
 
 
 def name_parts(student):
@@ -69,8 +71,12 @@ def load_data():
             data = json.load(f)
         for student in data.get("students", []):
             normalize_student(student)
-        return data
-    return {"students": [], "scan_log": {}}
+    else:
+        data = {"students": []}
+    data.setdefault("scan_log", {})
+    data.setdefault("signout_status", {})
+    data.setdefault("signout_log", [])
+    return data
 
 
 def save_data(data):
@@ -130,6 +136,49 @@ def find_student_by_barcode(data, barcode):
             if student_barcode == barcode:
                 return student, num
     return None, None
+
+
+# ── Sign out / sign in helpers ────────────────────────────────
+
+def entry_time_of(data, barcode):
+    """Entry time recorded by /api/scan for this exact barcode, or None."""
+    return data.get("scan_log", {}).get(barcode)
+
+
+def student_entry_time(data, student):
+    """First entry time among the student's barcodes, or None."""
+    for barcode in barcodes_of(student):
+        when = entry_time_of(data, barcode)
+        if when:
+            return when
+    return None
+
+
+def student_signout_state(data, student):
+    """Return (state, last_change) for a student: OUT / IN / NOT ENTERED."""
+    entry = student_entry_time(data, student)
+    if entry is None:
+        return "NOT ENTERED", None
+    record = data.get("signout_status", {}).get(student["id"])
+    if record and record.get("state") == "OUT":
+        return "OUT", record.get("since") or entry
+    if record and record.get("state") == "IN":
+        return "IN", record.get("since") or entry
+    return "IN", entry
+
+
+def reconcile_signout_data(data):
+    """Drop active sign-out state when a student no longer has entry evidence."""
+    valid_ids = {
+        student["id"]
+        for student in data.get("students", [])
+        if student_entry_time(data, student) is not None
+    }
+    status = data.get("signout_status", {})
+    for student_id in list(status):
+        if student_id not in valid_ids:
+            del status[student_id]
+    data["signout_status"] = status
 
 
 @app.route("/")
@@ -238,6 +287,7 @@ def load_csv():
             assigned_count += 1
 
     data["students"] = students
+    reconcile_signout_data(data)
     save_data(data)
     message = f"CSV loaded successfully. Assigned {assigned_count} students."
     if warnings:
@@ -414,6 +464,7 @@ def update_ticket_count():
         if stu["id"] == student_id:
             count, warning = parse_ticket_count(str(req.get("ticket_count", "")))
             set_ticket_count(stu, count)
+            reconcile_signout_data(data)
             save_data(data)
             return jsonify(
                 {
@@ -478,6 +529,106 @@ def scan_barcode():
             "ticket_count": count,
         }
     )
+
+
+@app.route("/api/signout", methods=["POST"])
+def signout_barcode():
+    """Toggle a student's OUT/IN status using the same ticket barcode."""
+    req = request.json or {}
+    barcode = (req.get("barcode") or "").strip()
+    if not barcode:
+        return jsonify({"success": False, "error": "Please scan a ticket"}), 400
+
+    with _signout_lock:
+        data = load_data()
+        student, ticket_num = find_student_by_barcode(data, barcode)
+        if student is None:
+            return jsonify(
+                {"success": False, "error": "INVALID - Unknown Ticket"}
+            )
+
+        entry_time = entry_time_of(data, barcode)
+        if entry_time is None:
+            return jsonify(
+                {"success": False, "error": "INVALID - Ticket not used at entry"}
+            )
+
+        now = datetime.now().strftime("%d/%m %H:%M")
+        status = data.setdefault("signout_status", {})
+        previous = status.get(student["id"], {}).get("state")
+        event = "IN" if previous == "OUT" else "OUT"
+        status[student["id"]] = {"state": event, "since": now}
+
+        first_name, last_name = name_parts(student)
+        data.setdefault("signout_log", []).append(
+            {
+                "time": now,
+                "event": event,
+                "student_id": student["id"],
+                "name": student["name"],
+                "first_name": first_name,
+                "last_name": last_name,
+                "barcode": barcode,
+                "ticket_num": ticket_num,
+            }
+        )
+        save_data(data)
+
+    label = "signed out" if event == "OUT" else "signed back in"
+    return jsonify(
+        {
+            "success": True,
+            "event": event,
+            "state": event,
+            "since": now,
+            "time": now,
+            "message": f"{student['name']} {label} at {now}",
+            "name": student["name"],
+            "first_name": first_name,
+            "last_name": last_name,
+            "student_id": student["id"],
+            "barcode": barcode,
+            "ticket_num": ticket_num,
+            "entry_time": entry_time,
+            "ticket_count": ticket_count_of(student),
+        }
+    )
+
+
+@app.route("/api/signout/status", methods=["GET"])
+def signout_status():
+    data = load_data()
+    rows = []
+    for student in data.get("students", []):
+        first_name, last_name = name_parts(student)
+        state, last_change = student_signout_state(data, student)
+        record = data.get("signout_status", {}).get(student["id"], {})
+        rows.append(
+            {
+                "id": student["id"],
+                "name": student["name"],
+                "first_name": first_name,
+                "last_name": last_name,
+                "state": state,
+                "since": record.get("since"),
+                "entry_time": student_entry_time(data, student),
+                "last_change": last_change,
+            }
+        )
+    return jsonify({"students": rows, "events": data.get("signout_log", [])})
+
+
+@app.route("/api/signout/reset", methods=["POST"])
+def reset_signout():
+    req = request.json or {}
+    if req.get("confirm") is not True:
+        return jsonify({"success": False, "error": "Confirmation required"}), 400
+    with _signout_lock:
+        data = load_data()
+        data["signout_status"] = {}
+        data["signout_log"] = []
+        save_data(data)
+    return jsonify({"success": True})
 
 
 @app.route("/api/lookup_barcodes", methods=["POST"])

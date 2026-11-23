@@ -27,9 +27,13 @@
         button.action-btn:hover { background: var(--accent); }
         input, select { padding: 8px; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box; margin-bottom: 10px; }
 
-        #scan-result { margin-top: 15px; padding: 15px; border-radius: 5px; font-weight: bold; text-align: center; font-size: 18px; }
+        #scan-result, #signout-result { margin-top: 15px; padding: 15px; border-radius: 5px; font-weight: bold; text-align: center; font-size: 18px; }
         .valid { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .invalid { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .warning { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+        .state-out { color: #dc3545; font-weight: bold; }
+        .state-in { color: #28a745; font-weight: bold; }
+        .state-none { color: #999; }
 
         table { width:100%; border-collapse: collapse; margin-top:10px; }
         th { background: var(--primary); color: white; padding:10px; border:1px solid #ddd; text-align:left; }
@@ -54,15 +58,13 @@
         <button class="tab-btn active" onclick="switchTab('generate')">Generate Tickets</button>
         <button class="tab-btn" onclick="switchTab('assign')">Assign Barcodes</button>
         <button class="tab-btn" onclick="switchTab('scan')">Scan Entry</button>
+        <button class="tab-btn" onclick="switchTab('signout')">Sign Out</button>
     </div>
 
     <!-- GENERATE TAB -->
     <div id="generate" class="tab-content active">
         <h2 class="no-print">Generate Tickets</h2>
         <div class="no-print" style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
-            <p style="margin:0 0 10px 0; font-size:14px;">
-                CSV columns: Surname (Last Name), Given Names (all words → First Name), Student ID and optionally <strong>Ticket Count</strong> (0-2, defaults to 2).
-            </p>
             <input type="file" id="csvInput" accept=".csv">
             <button class="action-btn" onclick="uploadCSV()">Upload CSV</button>
         </div>
@@ -109,6 +111,47 @@
         </div>
         <div id="scan-result"></div>
     </div>
+
+    <!-- SIGN OUT TAB -->
+    <div id="signout" class="tab-content">
+        <h2 class="no-print">Sign Out / Sign In</h2>
+        <div class="no-print" style="max-width: 400px; margin: 0 auto;">
+            <input type="text" id="signoutInput" placeholder="Scan Ticket...">
+            <button class="action-btn" style="width: 100%; margin-top: 10px;" onclick="submitSignout()">Toggle Sign Out / In</button>
+            <button class="action-btn" style="width: 100%;" onclick="clearSignoutResult()">Clear Result</button>
+            <button class="action-btn" style="width: 100%;" onclick="resetSignoutTracking()">Reset Tracking</button>
+        </div>
+        <div id="signout-result"></div>
+
+        <h3 style="margin-top: 30px;">Current Status</h3>
+        <table id="signoutStatusTable">
+            <thead>
+                <tr>
+                    <th>First Name</th>
+                    <th>Last Name</th>
+                    <th>Student ID</th>
+                    <th>Status</th>
+                    <th>Last Change</th>
+                </tr>
+            </thead>
+            <tbody id="signoutStatusBody"></tbody>
+        </table>
+
+        <h3 style="margin-top: 30px;">Sign Out / Sign In Events</h3>
+        <table id="signoutEventTable">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>First Name</th>
+                    <th>Last Name</th>
+                    <th>Student ID</th>
+                    <th>Ticket</th>
+                    <th>Event</th>
+                </tr>
+            </thead>
+            <tbody id="signoutEventBody"></tbody>
+        </table>
+    </div>
 </div>
 
 <script>
@@ -116,7 +159,8 @@
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         document.getElementById(tabId).classList.add('active');
-        document.querySelectorAll('.tab-btn')[['generate','assign','scan'].indexOf(tabId)].classList.add('active');
+        document.querySelectorAll('.tab-btn')[['generate','assign','scan','signout'].indexOf(tabId)].classList.add('active');
+        if (tabId === 'signout') loadSignoutStatus();
     }
 
     function renderStudentTable() {
@@ -285,8 +329,106 @@
         }).catch(err => alert('Error: ' + err));
     }
 
+    // ── Sign Out / Sign In ────────────────────────────────────
+
+    function escapeHtml(value) {
+        return String(value === undefined || value === null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function submitSignout() {
+        const code = document.getElementById('signoutInput').value.trim();
+        if (!code) return alert('Please scan a ticket');
+        fetch('/api/signout', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({barcode: code})
+        }).then(res => res.json()).then(data => {
+            const div = document.getElementById('signout-result');
+            if (!data.success) {
+                div.className = 'invalid';
+                div.textContent = data.error || 'Error during sign out';
+            } else {
+                div.className = data.event === 'OUT' ? 'warning' : 'valid';
+                div.textContent = data.message + ' (Ticket #' + data.ticket_num + ')';
+                loadSignoutStatus();
+            }
+            document.getElementById('signoutInput').value = '';
+            document.getElementById('signoutInput').focus();
+        }).catch(err => alert('Error: ' + err));
+    }
+
+    function loadSignoutStatus() {
+        fetch('/api/signout/status').then(res => res.json()).then(data => {
+            const statusBody = document.getElementById('signoutStatusBody');
+            statusBody.innerHTML = '';
+            const statusOrder = { OUT: 0, IN: 1, 'NOT ENTERED': 2 };
+            const sortedStudents = (data.students || []).slice().sort((a, b) => {
+                const aRank = statusOrder[a.state] === undefined ? 3 : statusOrder[a.state];
+                const bRank = statusOrder[b.state] === undefined ? 3 : statusOrder[b.state];
+                const diff = aRank - bRank;
+                if (diff !== 0) return diff;
+                return a.last_name.localeCompare(b.last_name) || a.first_name.localeCompare(b.first_name);
+            });
+            sortedStudents.forEach(s => {
+                const cls = s.state === 'OUT' ? 'state-out' : (s.state === 'IN' ? 'state-in' : 'state-none');
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${escapeHtml(s.first_name)}</td>
+                    <td>${escapeHtml(s.last_name)}</td>
+                    <td>${escapeHtml(s.id)}</td>
+                    <td class="${cls}">${escapeHtml(s.state)}</td>
+                    <td>${escapeHtml(s.last_change || '—')}</td>
+                `;
+                statusBody.appendChild(tr);
+            });
+
+            const eventBody = document.getElementById('signoutEventBody');
+            eventBody.innerHTML = '';
+            if (!data.events || data.events.length === 0) {
+                eventBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999;">No events yet</td></tr>';
+                return;
+            }
+            data.events.forEach(e => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${escapeHtml(e.time)}</td>
+                    <td>${escapeHtml(e.first_name)}</td>
+                    <td>${escapeHtml(e.last_name)}</td>
+                    <td>${escapeHtml(e.student_id)}</td>
+                    <td>${escapeHtml(e.barcode)} (Ticket #${escapeHtml(e.ticket_num)})</td>
+                    <td style="font-weight:bold;color:${e.event === 'OUT' ? '#dc3545' : '#28a745'};">
+                        ${escapeHtml(e.event)}
+                    </td>
+                `;
+                eventBody.appendChild(tr);
+            });
+        }).catch(err => alert('Error loading sign out status: ' + err));
+    }
+
+    function clearSignoutResult() {
+        document.getElementById('signout-result').innerHTML = '';
+        document.getElementById('signout-result').className = '';
+        document.getElementById('signoutInput').focus();
+    }
+
+    function resetSignoutTracking() {
+        if (!confirm('Reset all sign out tracking? This clears the status table and event log, but keeps entry scans.')) return;
+        fetch('/api/signout/reset', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({confirm: true})
+        }).then(res => res.json()).then(data => {
+            if (!data.success) return alert(data.error || 'Reset failed');
+            clearSignoutResult();
+            loadSignoutStatus();
+        }).catch(err => alert('Error: ' + err));
+    }
+
     window.onload = function() {
         renderStudentTable();
+        loadSignoutStatus();
     };
 
     document.getElementById('scanInput').addEventListener('keypress', e => {
@@ -299,6 +441,10 @@
 
     document.getElementById('lookupInput2').addEventListener('keypress', e => {
         handleLookupScan(e);
+    });
+
+    document.getElementById('signoutInput').addEventListener('keypress', e => {
+        if (e.key === 'Enter') { e.preventDefault(); submitSignout(); }
     });
 </script>
 </body>
