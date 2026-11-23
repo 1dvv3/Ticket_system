@@ -40,16 +40,96 @@ def draw_stroked_string(pdf_canvas, x, y, text, stroke_width=0.42, char_space=0.
     pdf_canvas.restoreState()
 
 
+MAX_TICKETS = 2
+DEFAULT_TICKET_COUNT = 2
+
+
+def name_parts(student):
+    """Return (first_name, last_name); legacy records split on the last space."""
+    if student.get("first_name") is not None or student.get("last_name") is not None:
+        return student.get("first_name") or "", student.get("last_name") or ""
+    full = (student.get("name") or "").strip()
+    first, sep, last = full.rpartition(" ")
+    return (first, last) if sep else (full, "")
+
+
+def normalize_student(student):
+    """Ensure every student exposes split name fields (legacy data compatibility)."""
+    first, last = name_parts(student)
+    student["first_name"] = first
+    student["last_name"] = last
+    if not (student.get("name") or "").strip():
+        student["name"] = " ".join(part for part in (first, last) if part)
+    return student
+
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        for student in data.get("students", []):
+            normalize_student(student)
+        return data
     return {"students": [], "scan_log": {}}
 
 
 def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def parse_ticket_count(value):
+    """Return a ticket count clamped to 0..MAX_TICKETS, and a warning if clamped."""
+    text = (value or "").strip()
+    if not text:
+        return DEFAULT_TICKET_COUNT, None
+    try:
+        count = int(float(text))
+    except ValueError:
+        return DEFAULT_TICKET_COUNT, f"invalid ticket count '{text}' - defaulted to {DEFAULT_TICKET_COUNT}"
+
+    if count < 0:
+        return 0, f"ticket count {count} - adjusted to the minimum of 0"
+    if count > MAX_TICKETS:
+        return MAX_TICKETS, (
+            f"has more than the maximum of {MAX_TICKETS} tickets "
+            f"({count}) - automatically adjusted to {MAX_TICKETS}"
+        )
+    return count, None
+
+
+def ticket_count_of(student):
+    count = student.get("ticket_count")
+    if count is None:
+        return sum(1 for key in ("barcode1", "barcode2") if student.get(key))
+    try:
+        return max(0, min(MAX_TICKETS, int(count)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def barcodes_of(student):
+    return [student[key] for key in ("barcode1", "barcode2") if student.get(key)]
+
+
+def set_ticket_count(student, count):
+    """Assign or remove barcodes so the student has exactly `count` of them."""
+    student["assigned"] = True
+    student["ticket_count"] = count
+    for num in range(1, MAX_TICKETS + 1):
+        key = f"barcode{num}"
+        if num <= count:
+            student[key] = f"{student['id']}_{num}"
+        else:
+            student[key] = None
+
+
+def find_student_by_barcode(data, barcode):
+    for student in data["students"]:
+        for num, student_barcode in enumerate(barcodes_of(student), start=1):
+            if student_barcode == barcode:
+                return student, num
+    return None, None
 
 
 @app.route("/")
@@ -76,41 +156,96 @@ def load_csv():
     existing = {s["id"]: s for s in data["students"]}
 
     students = []
+    warnings = []
     try:
-        stream = file.stream.read().decode("UTF-8")
-        csv_reader = csv.reader(stream.splitlines())
-        next(csv_reader, None)
+        stream = file.stream.read().decode("utf-8-sig")
+        csv_reader = csv.DictReader(stream.splitlines())
+        if csv_reader.fieldnames is None:
+            return jsonify({"error": "CSV is empty"}), 400
+
+        def column(names):
+            for name in names:
+                if name in csv_reader.fieldnames:
+                    return name
+            return None
+
+        surname_col = column(["Surname", "surname", "Last Name"])
+        given_col = column(["Given Names", "Given Name", "First Name"])
+        id_col = column(["Student ID", "student_id", "ID"])
+        count_col = column(["Ticket Count", "Tickets", "ticket_count"])
+
+        missing = [
+            name
+            for name, found in (
+                ("Surname", surname_col),
+                ("Given Names", given_col),
+                ("Student ID", id_col),
+            )
+            if not found
+        ]
+        if missing:
+            return jsonify(
+                {"error": f"CSV is missing required column(s): {', '.join(missing)}"}
+            ), 400
+
         for row in csv_reader:
-            if len(row) >= 3:
-                student_id = row[2].strip()
-                student = {
-                    "id": student_id,
-                    "name": f"{row[1].strip()} {row[0].strip()}",
-                    "barcode1": None,
-                    "barcode2": None,
-                    "assigned": False,
-                }
-                if student_id in existing and existing[student_id]["assigned"]:
-                    student["barcode1"] = existing[student_id]["barcode1"]
-                    student["barcode2"] = existing[student_id]["barcode2"]
-                    student["assigned"] = True
-                students.append(student)
+            student_id = (row.get(id_col) or "").strip()
+            if not student_id:
+                continue
+            first_name = (row.get(given_col) or "").strip()
+            last_name = (row.get(surname_col) or "").strip()
+            name = f"{first_name} {last_name}".strip()
+            count, warning = parse_ticket_count(
+                (row.get(count_col) or "") if count_col else ""
+            )
+            if warning:
+                warnings.append(f"{name} ({student_id}) {warning}")
+
+            # Reuse the barcode assignment from an existing student with the same ID.
+            old = existing.get(student_id)
+            previous_count = None
+            if old is not None:
+                if "ticket_count" in old:
+                    previous_count = ticket_count_of(old)
+                elif old.get("assigned"):
+                    previous_count = sum(
+                        1 for key in ("barcode1", "barcode2") if old.get(key)
+                    )
+
+            student = {
+                "id": student_id,
+                "name": name,
+                "first_name": first_name,
+                "last_name": last_name,
+                "barcode1": None,
+                "barcode2": None,
+                "ticket_count": count,
+                "assigned": False,
+            }
+            if previous_count is not None and previous_count <= count:
+                keep = min(previous_count, count)
+                for num in range(1, keep + 1):
+                    student[f"barcode{num}"] = old.get(f"barcode{num}")
+                student["assigned"] = True
+            students.append(student)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
     assigned_count = 0
     for stu in students:
         if not stu["assigned"]:
-            stu["barcode1"] = f"{stu['id']}_1"
-            stu["barcode2"] = f"{stu['id']}_2"
-            stu["assigned"] = True
+            set_ticket_count(stu, stu["ticket_count"])
             assigned_count += 1
 
     data["students"] = students
     save_data(data)
+    message = f"CSV loaded successfully. Assigned {assigned_count} students."
+    if warnings:
+        message += " " + " ".join(warnings)
     return jsonify(
         {
-            "message": f"CSV loaded successfully. Assigned {assigned_count} barcodes.",
+            "message": message,
+            "warnings": warnings,
             "count": len(students),
         }
     )
@@ -122,22 +257,15 @@ def generate_tickets():
     tickets = []
     for stu in data["students"]:
         if stu["assigned"]:
-            tickets.append(
-                {
-                    "student_id": stu["id"],
-                    "name": stu["name"],
-                    "barcode": stu["barcode1"],
-                    "ticket_num": 1,
-                }
-            )
-            tickets.append(
-                {
-                    "student_id": stu["id"],
-                    "name": stu["name"],
-                    "barcode": stu["barcode2"],
-                    "ticket_num": 2,
-                }
-            )
+            for ticket_num, barcode in enumerate(barcodes_of(stu), start=1):
+                tickets.append(
+                    {
+                        "student_id": stu["id"],
+                        "name": stu["name"],
+                        "barcode": barcode,
+                        "ticket_num": ticket_num,
+                    }
+                )
 
     if not tickets:
         return jsonify({"error": "No assigned students. Assign barcodes first."}), 400
@@ -262,15 +390,36 @@ def assign_barcode():
 
     for stu in data["students"]:
         if stu["id"] == student_id:
-            stu["barcode1"] = f"{student_id}_1"
-            stu["barcode2"] = f"{student_id}_2"
-            stu["assigned"] = True
+            set_ticket_count(stu, ticket_count_of(stu))
             save_data(data)
             return jsonify(
                 {
                     "success": True,
                     "barcode1": stu["barcode1"],
                     "barcode2": stu["barcode2"],
+                    "ticket_count": ticket_count_of(stu),
+                }
+            )
+
+    return jsonify({"success": False, "error": "Student not found"}), 404
+
+
+@app.route("/api/ticket_count", methods=["POST"])
+def update_ticket_count():
+    req = request.json or {}
+    student_id = req.get("student_id")
+    data = load_data()
+
+    for stu in data["students"]:
+        if stu["id"] == student_id:
+            count, warning = parse_ticket_count(str(req.get("ticket_count", "")))
+            set_ticket_count(stu, count)
+            save_data(data)
+            return jsonify(
+                {
+                    "success": True,
+                    "ticket_count": count,
+                    "warning": warning,
                 }
             )
 
@@ -283,9 +432,7 @@ def bulk_assign():
     assigned_count = 0
     for stu in data["students"]:
         if not stu["assigned"]:
-            stu["barcode1"] = f"{stu['id']}_1"
-            stu["barcode2"] = f"{stu['id']}_2"
-            stu["assigned"] = True
+            set_ticket_count(stu, ticket_count_of(stu))
             assigned_count += 1
     save_data(data)
     return jsonify({"success": True, "assigned": assigned_count})
@@ -297,19 +444,13 @@ def scan_barcode():
     barcode = req.get("barcode", "").strip()
     data = load_data()
 
-    student = None
-    ticket_num = None
-    for stu in data["students"]:
-        if stu["barcode1"] == barcode:
-            student, ticket_num = stu, 1
-            break
-        elif stu["barcode2"] == barcode:
-            student, ticket_num = stu, 2
-            break
+    student, ticket_num = find_student_by_barcode(data, barcode)
 
     if not student:
         return jsonify({"valid": False, "message": "INVALID - Unknown Ticket"})
 
+    first_name, last_name = name_parts(student)
+    count = ticket_count_of(student)
     scan_log = data.get("scan_log", {})
     if barcode in scan_log:
         return jsonify(
@@ -317,6 +458,9 @@ def scan_barcode():
                 "valid": False,
                 "message": f"INVALID - Already Used at {scan_log[barcode]}",
                 "name": student["name"],
+                "first_name": first_name,
+                "last_name": last_name,
+                "ticket_count": count,
             }
         )
 
@@ -329,6 +473,9 @@ def scan_barcode():
             "valid": True,
             "message": f"VALID - Welcome, {student['name']}! (Ticket #{ticket_num})",
             "name": student["name"],
+            "first_name": first_name,
+            "last_name": last_name,
+            "ticket_count": count,
         }
     )
 
@@ -336,36 +483,34 @@ def scan_barcode():
 @app.route("/api/lookup_barcodes", methods=["POST"])
 def lookup_barcodes():
     req = request.json
-    barcode1 = req.get("barcode1", "").strip()
-    barcode2 = req.get("barcode2", "").strip()
+    barcode1 = (req.get("barcode1") or "").strip()
+    barcode2 = (req.get("barcode2") or "").strip()
+    if not barcode1 and not barcode2:
+        return jsonify({"error": "Please scan at least one ticket"}), 400
     data = load_data()
 
     result = {"barcode1": None, "barcode2": None, "error": None}
 
-    student1 = None
-    student2 = None
-
-    for stu in data["students"]:
-        if stu["barcode1"] == barcode1 or stu["barcode2"] == barcode1:
-            student1 = stu
-            result["barcode1"] = {
-                "name": stu["name"],
-                "student_id": stu["id"],
-                "barcode": barcode1,
-                "ticket_num": 1 if stu["barcode1"] == barcode1 else 2,
-            }
-        if stu["barcode1"] == barcode2 or stu["barcode2"] == barcode2:
-            student2 = stu
-            result["barcode2"] = {
-                "name": stu["name"],
-                "student_id": stu["id"],
-                "barcode": barcode2,
-                "ticket_num": 1 if stu["barcode1"] == barcode2 else 2,
-            }
+    for key, barcode in (("barcode1", barcode1), ("barcode2", barcode2)):
+        if not barcode:
+            continue
+        student, ticket_num = find_student_by_barcode(data, barcode)
+        if student is None:
+            continue
+        first_name, last_name = name_parts(student)
+        result[key] = {
+            "name": student["name"],
+            "first_name": first_name,
+            "last_name": last_name,
+            "student_id": student["id"],
+            "barcode": barcode,
+            "ticket_num": ticket_num,
+            "ticket_count": ticket_count_of(student),
+        }
 
     # Check if both barcodes belong to the same student
     if result["barcode1"] and result["barcode2"]:
-        if student1["id"] != student2["id"]:
+        if result["barcode1"]["student_id"] != result["barcode2"]["student_id"]:
             result["error"] = (
                 "Wrong pair of tickets - barcodes belong to different students"
             )

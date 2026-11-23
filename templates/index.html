@@ -60,6 +60,9 @@
     <div id="generate" class="tab-content active">
         <h2 class="no-print">Generate Tickets</h2>
         <div class="no-print" style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+            <p style="margin:0 0 10px 0; font-size:14px;">
+                CSV columns: Surname (Last Name), Given Names (all words → First Name), Student ID and optionally <strong>Ticket Count</strong> (0-2, defaults to 2).
+            </p>
             <input type="file" id="csvInput" accept=".csv">
             <button class="action-btn" onclick="uploadCSV()">Upload CSV</button>
         </div>
@@ -72,8 +75,10 @@
             <table id="studentTable">
                 <thead>
                     <tr>
-                        <th>Student Name</th>
+                        <th>First Name</th>
+                        <th>Last Name</th>
                         <th>Student ID</th>
+                        <th>Tickets</th>
                         <th>Barcode 1</th>
                         <th>Barcode 2</th>
                         <th>Status</th>
@@ -119,14 +124,21 @@
             const tbody = document.getElementById('studentTableBody');
             tbody.innerHTML = '';
             if (data.students.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">No students loaded</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;">No students loaded</td></tr>';
                 return;
             }
             data.students.forEach(s => {
                 const tr = document.createElement('tr');
+                const count = s.ticket_count === undefined ? 2 : s.ticket_count;
                 tr.innerHTML = `
-                    <td>${s.name}</td>
+                    <td>${s.first_name || ''}</td>
+                    <td>${s.last_name || ''}</td>
                     <td>${s.id}</td>
+                    <td>
+                        <select onchange="updateTicketCount('${s.id.replace(/'/g, "\\'")}', this.value)" title="Number of tickets">
+                            ${[0, 1, 2].map(n => `<option value="${n}" ${n === count ? 'selected' : ''}>${n}</option>`).join('')}
+                        </select>
+                    </td>
                     <td>${s.barcode1 || '<span style="color:#999;">Not Assigned</span>'}</td>
                     <td>${s.barcode2 || '<span style="color:#999;">Not Assigned</span>'}</td>
                     <td style="color:${s.assigned ? '#28a745' : '#dc3545'}; font-weight:bold;">
@@ -136,6 +148,17 @@
                 tbody.appendChild(tr);
             });
         }).catch(err => alert('Error loading students: ' + err));
+    }
+
+    function updateTicketCount(studentId, value) {
+        fetch('/api/ticket_count', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({student_id: studentId, ticket_count: Number(value)})
+        }).then(res => res.json()).then(data => {
+            if (data.error) alert(data.error);
+            renderStudentTable();
+        }).catch(err => alert('Error: ' + err));
     }
 
     function uploadCSV() {
@@ -167,10 +190,13 @@
     function handleLookupScan(e, nextInputId) {
         if (e.key !== 'Enter') return;
         e.preventDefault();
-        if (!e.target.value.trim()) return;
-
         if (nextInputId) {
-            document.getElementById(nextInputId).focus();
+            if (e.target.value.trim()) {
+                document.getElementById(nextInputId).focus();
+                return;
+            }
+            // Empty second field: submit the single scanned ticket.
+            lookupBarcodes();
             return;
         }
 
@@ -180,7 +206,7 @@
     function lookupBarcodes() {
         const code1 = document.getElementById('lookupInput1').value.trim();
         const code2 = document.getElementById('lookupInput2').value.trim();
-        if (!code1 || !code2) return alert('Please scan both tickets');
+        if (!code1 && !code2) return alert('Please scan at least one ticket');
         fetch('/api/lookup_barcodes', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -199,29 +225,33 @@
 
             html += '<table style="width:100%; border-collapse: collapse;">';
             html += '<tr><th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Ticket</th>';
-            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Student Name</th>';
+            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">First Name</th>';
+            html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Last Name</th>';
             html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Student ID</th>';
             html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Barcode</th>';
             html += '<th style="background:#003366;color:white;padding:10px;border:1px solid #ddd;">Ticket #</th></tr>';
 
             ['barcode1', 'barcode2'].forEach((key, idx) => {
+                const scanned = key === 'barcode1' ? code1 : code2;
                 const info = data[key];
                 if (info) {
                     const rowStyle = data.error ? 'padding:10px;border:1px solid #ddd;background:#fff3cd;' : 'padding:10px;border:1px solid #ddd;';
+                    const note = info.ticket_count === 1 ? ' <span style="color:#856404;">(Only 1 ticket assigned)</span>' : '';
                     html += `<tr>
                         <td style="${rowStyle}">Ticket ${idx+1}</td>
-                        <td style="${rowStyle}">${info.name}</td>
+                        <td style="${rowStyle}">${info.first_name || ''}</td>
+                        <td style="${rowStyle}">${info.last_name || ''}</td>
                         <td style="${rowStyle}">${info.student_id}</td>
                         <td style="${rowStyle}">${info.barcode}</td>
-                        <td style="${rowStyle}">${info.ticket_num}</td>
+                        <td style="${rowStyle}">${info.ticket_num}${note}</td>
                     </tr>`;
-                } else {
-                    const scanned = idx === 0 ? code1 : code2;
+                } else if (scanned) {
                     html += `<tr>
                         <td style="padding:10px;border:1px solid #ddd;">Ticket ${idx+1}</td>
-                        <td colspan="4" style="padding:10px;border:1px solid #ddd;color:#dc3545;font-weight:bold;">No match found for: ${scanned}</td>
+                        <td colspan="5" style="padding:10px;border:1px solid #ddd;color:#dc3545;font-weight:bold;">No match found for: ${scanned}</td>
                     </tr>`;
                 }
+                // An empty scan field produces no row at all.
             });
             html += '</table>';
             div.innerHTML = html;
@@ -243,7 +273,13 @@
         }).then(res => res.json()).then(data => {
             const div = document.getElementById('scan-result');
             div.className = data.valid ? 'valid' : 'invalid';
-            div.innerHTML = `${data.message}<br>${data.name ? 'Student: ' + data.name : ''}`;
+            const studentName = data.first_name !== undefined
+                ? [data.first_name, data.last_name].filter(Boolean).join(' ')
+                : (data.name || '');
+            const ticketNote = data.ticket_count === 1
+                ? '<br><span style="font-size:14px;">This student has only 1 ticket assigned</span>'
+                : '';
+            div.innerHTML = `${data.message}<br>${studentName ? 'Student: ' + studentName : ''}${ticketNote}`;
             document.getElementById('scanInput').value = '';
             document.getElementById('scanInput').focus();
         }).catch(err => alert('Error: ' + err));
