@@ -44,10 +44,32 @@ MAX_TICKETS = 2
 DEFAULT_TICKET_COUNT = 2
 
 
+def name_parts(student):
+    """Return (first_name, last_name); legacy records split on the last space."""
+    if student.get("first_name") is not None or student.get("last_name") is not None:
+        return student.get("first_name") or "", student.get("last_name") or ""
+    full = (student.get("name") or "").strip()
+    first, sep, last = full.rpartition(" ")
+    return (first, last) if sep else (full, "")
+
+
+def normalize_student(student):
+    """Ensure every student exposes split name fields (legacy data compatibility)."""
+    first, last = name_parts(student)
+    student["first_name"] = first
+    student["last_name"] = last
+    if not (student.get("name") or "").strip():
+        student["name"] = " ".join(part for part in (first, last) if part)
+    return student
+
+
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        for student in data.get("students", []):
+            normalize_student(student)
+        return data
     return {"students": [], "scan_log": {}}
 
 
@@ -170,7 +192,9 @@ def load_csv():
             student_id = (row.get(id_col) or "").strip()
             if not student_id:
                 continue
-            name = f"{(row.get(given_col) or '').strip()} {(row.get(surname_col) or '').strip()}".strip()
+            first_name = (row.get(given_col) or "").strip()
+            last_name = (row.get(surname_col) or "").strip()
+            name = f"{first_name} {last_name}".strip()
             count, warning = parse_ticket_count(
                 (row.get(count_col) or "") if count_col else ""
             )
@@ -191,6 +215,8 @@ def load_csv():
             student = {
                 "id": student_id,
                 "name": name,
+                "first_name": first_name,
+                "last_name": last_name,
                 "barcode1": None,
                 "barcode2": None,
                 "ticket_count": count,
@@ -423,6 +449,8 @@ def scan_barcode():
     if not student:
         return jsonify({"valid": False, "message": "INVALID - Unknown Ticket"})
 
+    first_name, last_name = name_parts(student)
+    count = ticket_count_of(student)
     scan_log = data.get("scan_log", {})
     if barcode in scan_log:
         return jsonify(
@@ -430,6 +458,9 @@ def scan_barcode():
                 "valid": False,
                 "message": f"INVALID - Already Used at {scan_log[barcode]}",
                 "name": student["name"],
+                "first_name": first_name,
+                "last_name": last_name,
+                "ticket_count": count,
             }
         )
 
@@ -442,6 +473,9 @@ def scan_barcode():
             "valid": True,
             "message": f"VALID - Welcome, {student['name']}! (Ticket #{ticket_num})",
             "name": student["name"],
+            "first_name": first_name,
+            "last_name": last_name,
+            "ticket_count": count,
         }
     )
 
@@ -449,36 +483,34 @@ def scan_barcode():
 @app.route("/api/lookup_barcodes", methods=["POST"])
 def lookup_barcodes():
     req = request.json
-    barcode1 = req.get("barcode1", "").strip()
-    barcode2 = req.get("barcode2", "").strip()
+    barcode1 = (req.get("barcode1") or "").strip()
+    barcode2 = (req.get("barcode2") or "").strip()
+    if not barcode1 and not barcode2:
+        return jsonify({"error": "Please scan at least one ticket"}), 400
     data = load_data()
 
     result = {"barcode1": None, "barcode2": None, "error": None}
 
-    student1 = None
-    student2 = None
-
-    for stu in data["students"]:
-        if barcode1 in barcodes_of(stu):
-            student1 = stu
-            result["barcode1"] = {
-                "name": stu["name"],
-                "student_id": stu["id"],
-                "barcode": barcode1,
-                "ticket_num": barcodes_of(stu).index(barcode1) + 1,
-            }
-        if barcode2 in barcodes_of(stu):
-            student2 = stu
-            result["barcode2"] = {
-                "name": stu["name"],
-                "student_id": stu["id"],
-                "barcode": barcode2,
-                "ticket_num": barcodes_of(stu).index(barcode2) + 1,
-            }
+    for key, barcode in (("barcode1", barcode1), ("barcode2", barcode2)):
+        if not barcode:
+            continue
+        student, ticket_num = find_student_by_barcode(data, barcode)
+        if student is None:
+            continue
+        first_name, last_name = name_parts(student)
+        result[key] = {
+            "name": student["name"],
+            "first_name": first_name,
+            "last_name": last_name,
+            "student_id": student["id"],
+            "barcode": barcode,
+            "ticket_num": ticket_num,
+            "ticket_count": ticket_count_of(student),
+        }
 
     # Check if both barcodes belong to the same student
     if result["barcode1"] and result["barcode2"]:
-        if student1["id"] != student2["id"]:
+        if result["barcode1"]["student_id"] != result["barcode2"]["student_id"]:
             result["error"] = (
                 "Wrong pair of tickets - barcodes belong to different students"
             )
